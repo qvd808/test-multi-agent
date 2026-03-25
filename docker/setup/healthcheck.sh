@@ -3,6 +3,7 @@ set -e
 
 PASS="\033[32mPASS\033[0m"
 FAIL="\033[31mFAIL\033[0m"
+WARN_C="\033[33mWARN\033[0m"
 ERRORS=0
 
 check() {
@@ -14,6 +15,17 @@ check() {
     else
         printf "$FAIL\n"
         ERRORS=$((ERRORS + 1))
+    fi
+}
+
+warn_check() {
+    DESC="$1"
+    shift
+    printf "[setup] %-50s ... " "$DESC"
+    if "$@" > /dev/null 2>&1; then
+        printf "$PASS\n"
+    else
+        printf "$WARN_C (non-fatal)\n"
     fi
 }
 
@@ -37,9 +49,9 @@ check "checking model '${MODEL}' is pulled" \
 check "checking SQLite volume writable" \
     sh -c "touch /data/db/test_write && rm /data/db/test_write"
 
-# ── Check 4: GitHub token valid ────────────────────────────────
-check "checking GitHub token" \
-    sh -c "[ -n '${GITHUB_TOKEN}' ] && curl -sf --max-time 10 -H 'Authorization: token ${GITHUB_TOKEN}' https://api.github.com/user"
+# ── Check 4: GitHub token (non-fatal) ─────────────────────────
+warn_check "checking GitHub token" \
+    sh -c "[ -n '${GITHUB_TOKEN}' ] && [ '${GITHUB_TOKEN}' != 'your_personal_access_token' ] && curl -sf --max-time 10 -H 'Authorization: token ${GITHUB_TOKEN}' https://api.github.com/user"
 
 echo ""
 
@@ -53,3 +65,4 @@ echo "[setup] ✓ all checks passed — starting agent"
 touch /tmp/setup-done
 # Keep container alive briefly so healthcheck can read the done marker
 sleep 5
+

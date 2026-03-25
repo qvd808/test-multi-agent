@@ -30,5 +30,7 @@ COPY agents/ ./agents/
 COPY tools/ ./tools/
 COPY env/ ./env/
 COPY metrics/ ./metrics/
+# Ensure Python output is not buffered (real-time docker logs)
+ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "main.py"]
+CMD ["python", "-u", "main.py"]
