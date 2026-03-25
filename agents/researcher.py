@@ -57,12 +57,15 @@ def researcher_node(state: AgentState) -> AgentState:
 
     raw_context = "\n\n".join(context_chunks)
 
-    # Step 2: Ask the LLM to synthesise a structured research summary
-    llm = ChatOllama(
-        model=model_name,
-        base_url=ollama_url,
-        temperature=0.3,
-    )
+    gemini_key = os.environ.get("GOOGLE_API_KEY")
+
+    llm_ollama = ChatOllama(model=model_name, base_url=ollama_url, temperature=0.3)
+    if gemini_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm_gemini = ChatGoogleGenerativeAI(model="gemini-1.5-pro", temperature=0.3, max_retries=0)
+        llm = llm_gemini.with_fallbacks([llm_ollama])
+    else:
+        llm = llm_ollama
 
     prompt = (
         f"Here are search results about RL trading agents:\n\n{raw_context}\n\n"

@@ -30,6 +30,7 @@ COPY agents/ ./agents/
 COPY tools/ ./tools/
 COPY env/ ./env/
 COPY metrics/ ./metrics/
+COPY db/ ./db/
 # Ensure Python output is not buffered (real-time docker logs)
 ENV PYTHONUNBUFFERED=1
 

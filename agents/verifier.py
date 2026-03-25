@@ -35,7 +35,9 @@ You will be given Python source code and must produce a .v file that:
    - deterministic_step: same state + action → same next_state
 
 Output ONLY valid Rocq/Coq source code. No markdown, no explanations.
-Start with appropriate Require Import statements."""
+Start with appropriate Require Import statements.
+IMPORTANT: The environment runs Coq 8.12.2. DO NOT use `Require Import Coq.Init.Prim.`, as it does not exist in this version.
+Use standard libraries like `Coq.Reals.Reals`, `Coq.Init.Nat`, etc."""
 
 
 def verifier_node(state: AgentState) -> AgentState:
@@ -54,11 +56,15 @@ def verifier_node(state: AgentState) -> AgentState:
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     model_name = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct-q4_K_M")
 
-    llm = ChatOllama(
-        model=model_name,
-        base_url=ollama_url,
-        temperature=0.1,
-    )
+    gemini_key = os.environ.get("GOOGLE_API_KEY")
+
+    llm_ollama = ChatOllama(model=model_name, base_url=ollama_url, temperature=0.1)
+    if gemini_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm_gemini = ChatGoogleGenerativeAI(model="gemini-1.5-pro", temperature=0.1, max_retries=0)
+        llm = llm_gemini.with_fallbacks([llm_ollama])
+    else:
+        llm = llm_ollama
 
     prompt = (
         f"Here is a Python RL trading agent:\n\n```python\n{generated_code}\n```\n\n"

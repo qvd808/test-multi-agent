@@ -1,4 +1,8 @@
-DIGEST f3145741848c08f130936c7e8c96834d
+DIGEST c89322f0a7f7e5434cffafbbcb48857a
 Ftrading_agent_proof
 R15:26 Coq.Init.Nat <> <> lib
-R44:57 Coq.Init.Peano <> <> lib
+R44:58 Coq.Reals.Reals <> <> lib
+sec 70:84 <> PaperTradingEnv
+var 98:101 PaperTradingEnv data
+R106:108 Coq.Init.Nat <> ::nat_scope:x_'^'_x not
+R105:105 Coq.Reals.Rdefinitions RbaseSymbolsImpl R defax

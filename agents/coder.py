@@ -53,19 +53,23 @@ Output ONLY the corrected Python code."""
 def coder_node(state: AgentState) -> AgentState:
     """Generate or fix RL trading code."""
     retry_count = state.get("retry_count", 0)
-    is_retry = retry_count > 0 and state.get("retry_feedback")
+    is_retry = bool(state.get("retry_feedback"))
 
-    phase_label = f"retry {retry_count}" if is_retry else "initial generation"
+    phase_label = f"retry {retry_count + 1}" if is_retry else "initial generation"
     print(f"[coder] Starting code generation ({phase_label})")
 
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     model_name = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct-q4_K_M")
 
-    llm = ChatOllama(
-        model=model_name,
-        base_url=ollama_url,
-        temperature=0.2,
-    )
+    gemini_key = os.environ.get("GOOGLE_API_KEY")
+
+    llm_ollama = ChatOllama(model=model_name, base_url=ollama_url, temperature=0.2)
+    if gemini_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm_gemini = ChatGoogleGenerativeAI(model="gemini-1.5-pro", temperature=0.2, max_retries=0)
+        llm = llm_gemini.with_fallbacks([llm_ollama])
+    else:
+        llm = llm_ollama
 
     if is_retry:
         user_prompt = RETRY_PROMPT_TEMPLATE.format(
@@ -108,5 +112,5 @@ def coder_node(state: AgentState) -> AgentState:
         "generated_code": generated_code,
         "code_filepath": filepath,
         "current_phase": "verify",
-        "retry_count": retry_count + (1 if is_retry else 0),
+        "retry_count": retry_count + 1 if is_retry else 0,
     }
