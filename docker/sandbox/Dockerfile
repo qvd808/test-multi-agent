@@ -5,7 +5,10 @@ RUN pip install --no-cache-dir \
     gymnasium>=0.29.0 \
     numpy>=1.26.0 \
     pandas>=2.1.0 \
-    yfinance>=0.2.30 \
+    yfinance>=0.2.30
+
+# PyTorch CPU-only (separate install to use custom index)
+RUN pip install --no-cache-dir \
     torch --index-url https://download.pytorch.org/whl/cpu
 
 WORKDIR /app
