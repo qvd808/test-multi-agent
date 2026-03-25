@@ -1,0 +1,59 @@
+services:
+  # ── Setup container ─────────────────────────────────────────────
+  # Runs once, verifies the entire stack, exits with pass/fail report
+  setup:
+    build:
+      context: ./docker/setup
+    container_name: rl-setup
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - db-data:/data/db
+    networks:
+      - rl-network
+    healthcheck:
+      test: ["CMD", "cat", "/tmp/setup-done"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # ── Agent container ─────────────────────────────────────────────
+  # Python + LangGraph + Rocq — runs the multi-agent pipeline
+  agent:
+    build:
+      context: .
+      dockerfile: docker/agent/Dockerfile
+    container_name: rl-agent
+    env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - db-data:/data/db
+      - ./output:/app/output
+      - ./proofs:/app/proofs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      setup:
+        condition: service_healthy
+    networks:
+      - rl-network
+
+  # ── RL Sandbox container ────────────────────────────────────────
+  # Isolated execution environment for generated RL code
+  # No outbound network — deployable as standalone image
+  sandbox:
+    build:
+      context: ./docker/sandbox
+    container_name: rl-sandbox
+    network_mode: "none"
+    volumes:
+      - ./output:/app/output:ro
+
+networks:
+  rl-network:
+    driver: bridge
+
+volumes:
+  db-data:
+    driver: local

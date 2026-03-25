@@ -1,0 +1,20 @@
+# Agent orchestration
+langgraph>=0.2.0
+langchain-community>=0.3.0
+langchain-ollama>=0.2.0
+
+# Agent tools
+tavily-python>=0.5.0
+PyGithub>=2.1.0
+
+# RL / Trading
+gymnasium>=0.29.0
+numpy>=1.26.0
+pandas>=2.1.0
+yfinance>=0.2.30
+
+# Database
+# SQLite is stdlib — no extra package needed
+
+# Utilities
+python-dotenv>=1.0.0
