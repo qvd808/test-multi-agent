@@ -18,20 +18,22 @@ from state import AgentState
 SYSTEM_PROMPT = """You are an expert Python developer specialising in reinforcement learning.
 Your job is to generate a complete, runnable RL paper trading agent using Gymnasium.
 
+CRITICAL REQUIREMENT:
+You MUST implement the environment logic (trading step) exactly as defined in the provided Coq mathematical specification. 
+The verifier will run a differential fuzzer against your code and a verified reference extracted from Coq. 
+If your logic deviates (e.g. different commission calculation, different position check), verification will fail.
+
 Requirements:
 1. Use a standard RL algorithm (DQN with a simple neural network)
 2. Implement a Gymnasium environment for paper trading with OHLCV data
-3. Portfolio value must NEVER go below zero
-4. Position sizes must stay within defined bounds (0 to max_position)
-5. The reward function must always return a finite float value
-6. State transitions must be deterministic given the same inputs
-7. Include clear docstrings and type hints
+3. Follow the provided Coq specification for the `step` function logic
+4. Include clear docstrings and type hints
 
 Output ONLY valid Python code — no markdown fences, no explanations outside comments.
 The code must be a single file that can be saved and run directly."""
 
 
-RETRY_PROMPT_TEMPLATE = """The verifier found issues with your previous code.
+RETRY_PROMPT_TEMPLATE = """The verifier found mismatches between your code and the verified specification.
 
 Previous code:
 ```python
@@ -41,11 +43,7 @@ Previous code:
 Verifier feedback:
 {feedback}
 
-Fix the issues while maintaining all structural guarantees:
-- Portfolio value never negative
-- Position sizes within bounds
-- Reward always finite
-- Deterministic state transitions
+Fix the issues so that your `TradingEnv.step` method exactly matches the mathematical model in the Coq specification.
 
 Output ONLY the corrected Python code."""
 
@@ -57,6 +55,14 @@ def coder_node(state: AgentState) -> AgentState:
 
     phase_label = f"retry {retry_count + 1}" if is_retry else "initial generation"
     print(f"[coder] Starting code generation ({phase_label})")
+
+    # Read the Coq specification to include in the prompt
+    spec_path = os.path.join(os.path.dirname(__file__), "..", "proofs", "trading_agent_proof.v")
+    try:
+        with open(spec_path, "r") as f:
+            coq_spec = f.read()
+    except Exception:
+        coq_spec = "No specification found."
 
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     model_name = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct-q4_K_M")
@@ -79,10 +85,11 @@ def coder_node(state: AgentState) -> AgentState:
     else:
         research = state.get("research_context", "(no research context available)")
         user_prompt = (
+            f"FORMAL SPECIFICATION (FOLLOW THIS EXACTLY):\n\n{coq_spec}\n\n"
             f"Based on this research:\n\n{research}\n\n"
             "Generate a complete, single-file Python RL paper trading agent. "
-            "The file should be runnable with `python <filename>` and include "
-            "training + a simple backtest at the end."
+            "Implement the `TradingEnv.step` function to match the logic of the `step` function in the Coq spec above. "
+            "The file should be runnable with `python <filename>` and include training + backtest."
         )
 
     response = llm.invoke([
@@ -93,8 +100,8 @@ def coder_node(state: AgentState) -> AgentState:
     generated_code = response.content
 
     # Strip markdown code fences if the LLM included them
-    if generated_code.startswith("```"):
-        lines = generated_code.split("\n")
+    if generated_code.strip().startswith("```"):
+        lines = generated_code.strip().split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         generated_code = "\n".join(lines)
 

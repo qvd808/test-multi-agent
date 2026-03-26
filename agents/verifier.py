@@ -1,146 +1,133 @@
-"""Verifier agent — generates and checks Rocq proofs for the generated code.
-
-The verifier asks the LLM to produce a Rocq (.v) proof stub that encodes
-structural properties of the generated code:
-  - Portfolio value ≥ 0
-  - Position sizes within bounds
-  - Reward returns finite value
-  - Deterministic state transitions
-
-It then runs `coqc` to check the proof. If the proof compiles, verification
-passes. If not, the error is fed back to the coder for retry.
-"""
-
-from __future__ import annotations
-
 import os
-import subprocess
+import sys
+import random
+import numpy as np
 import tempfile
-
+import subprocess
 from langchain_ollama import ChatOllama
-
 from state import AgentState
 
-
-SYSTEM_PROMPT = """You are a formal verification assistant.
-Your job is simply to output a valid, compiling Rocq (Coq) proof script that trivially passes verification.
-Output ONLY valid Coq source code. No markdown blocks. No explanations.
-IMPORTANT: The environment runs Coq 8.12.2."""
-
-
-def verifier_node(state: AgentState) -> AgentState:
-    """Generate a Rocq proof and attempt to compile it."""
-    print("[verifier] Starting verification phase")
-
-    generated_code = state.get("generated_code", "")
-    if not generated_code:
-        return {
-            **state,
-            "proof_passed": False,
-            "proof_error": "No generated code to verify",
-            "retry_feedback": "No code was generated. Please generate the trading agent code.",
-        }
-
+def get_llm():
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     model_name = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct-q4_K_M")
-
     gemini_key = os.environ.get("GOOGLE_API_KEY")
 
     llm_ollama = ChatOllama(model=model_name, base_url=ollama_url, temperature=0.1)
     if gemini_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
-        llm_gemini = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1, max_retries=0)
-        llm = llm_gemini.with_fallbacks([llm_ollama])
-    else:
-        llm = llm_ollama
+        return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.0, max_retries=0).with_fallbacks([llm_ollama])
+    return llm_ollama
 
-    prompt = (
-        f"Here is a Python RL trading agent:\n\n```python\n{generated_code}\n```\n\n"
-        "To allow the pipeline to pass gracefully, please respond with the following exact dummy Coq proof:\n"
-        "Require Import Arith.\n"
-        "Theorem dummy_proof : 1 = 1.\n"
-        "Proof. reflexivity. Qed.\n"
-    )
+def verifier_node(state: AgentState) -> AgentState:
+    print("[verifier] Starting specification-driven verification")
 
-    response = llm.invoke([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ])
+    generated_code = state.get("generated_code", "")
+    if not generated_code:
+        return {**state, "proof_passed": False, "proof_error": "No code to verify"}
 
-    proof_source = response.content
+    # 1. Compile the User's Proof to ensure it's mathematically sound
+    spec_path = "proofs/trading_agent_proof.v"
+    if not os.path.exists(spec_path):
+        return {**state, "proof_passed": False, "proof_error": f"Specification not found at {spec_path}"}
 
-    # Strip markdown fences if present
-    if proof_source.startswith("```"):
-        lines = proof_source.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        proof_source = "\n".join(lines)
+    print(f"[verifier] Compiling Coq specification: {spec_path}")
+    comp_result = subprocess.run(["coqc", spec_path], capture_output=True, text=True)
+    if comp_result.returncode != 0:
+        error = comp_result.stderr or comp_result.stdout
+        print(f"[verifier] ✗ Specification failed to compile:\n{error[:500]}")
+        return {**state, "proof_passed": False, "proof_error": f"Coq Spec Error:\n{error}"}
 
-    # Write proof to disk
-    proofs_dir = os.path.join(os.path.dirname(__file__), "..", "proofs")
-    os.makedirs(proofs_dir, exist_ok=True)
-    proof_path = os.path.join(proofs_dir, "trading_agent_proof.v")
-    with open(proof_path, "w") as f:
-        f.write(proof_source)
+    # 2. Translate Coq logic to Python Reference (via LLM)
+    # This acts as our executable specification.
+    with open(spec_path, "r") as f:
+        coq_spec = f.read()
 
-    print(f"[verifier] Wrote proof to {proof_path}")
+    print("[verifier] Translating Coq specification to Python reference...")
+    llm = get_llm()
+    translation_prompt = f"""You are a formal methods expert. 
+Translate the following Coq `step` function and types into a pure Python function `reference_step(params, state, price, action)`.
 
-    # Attempt to compile with coqc
+COQ SPECIFICATION:
+{coq_spec}
+
+REQUIREMENTS:
+1. Output ONLY the Python code. No explanations.
+2. The `state` is a dict: {{'cash': float, 'shares_held': int}}.
+3. The `params` is a dict: {{'commission_rate': float, 'max_position': int, 'share_size': int}}.
+4. The `action` is an int: 0 (Hold), 1 (Buy), 2 (Sell).
+5. Ensure the logic (affordability checks, position bounds, commission) exactly matches the Coq code.
+"""
+
+    resp = llm.invoke([{"role": "user", "content": translation_prompt}])
+    ref_code = resp.content.replace("```python", "").replace("```", "").strip()
+
+    # 3. Differential Testing (Fuzzing)
+    print("[verifier] Running differential fuzzer against generated agent...")
+    
+    # Load the generated agent and the reference step
+    test_locals = {}
     try:
-        result = subprocess.run(
-            ["coqc", proof_path],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        # We need gymnasiym and numpy in the namespace
+        import gymnasium as gym
+        from gymnasium import spaces
+        exec(generated_code, {"gym": gym, "spaces": spaces, "np": np, "torch": None, "optim": None, "nn": None, "pd": None, "random": random, "deque": None, "os": os}, test_locals)
+        exec(ref_code, {}, test_locals)
+    except Exception as e:
+        return {**state, "proof_passed": False, "proof_error": f"Failed to load code: {str(e)}", "retry_feedback": f"Python loading error: {str(e)}"}
 
-        if result.returncode == 0:
-            print("[verifier] ✓ Proof compiled successfully")
-            return {
-                **state,
-                "proof_source": proof_source,
-                "proof_filepath": proof_path,
-                "proof_passed": True,
-                "proof_error": "",
-                "retry_feedback": "",
-                "current_phase": "push",
-            }
-        else:
-            error_msg = result.stderr or result.stdout
-            print(f"[verifier] ✗ Proof failed:\n{error_msg[:500]}")
-            return {
-                **state,
-                "proof_source": proof_source,
-                "proof_filepath": proof_path,
-                "proof_passed": False,
-                "proof_error": error_msg,
-                "retry_feedback": (
-                    f"Rocq proof compilation failed. Error:\n{error_msg}\n\n"
-                    "Please adjust the Python code so that these structural properties "
-                    "can be more easily verified. Ensure explicit bounds checking, "
-                    "non-negative portfolio enforcement, and deterministic transitions."
-                ),
-                "current_phase": "code",
-            }
+    TradingEnv = test_locals.get("TradingEnv")
+    reference_step = test_locals.get("reference_step")
 
-    except FileNotFoundError:
-        msg = "coqc not found — Rocq/Coq is not installed in this environment"
-        print(f"[verifier] ✗ {msg}")
-        return {
-            **state,
-            "proof_source": proof_source,
-            "proof_filepath": proof_path,
-            "proof_passed": False,
-            "proof_error": msg,
-            "retry_feedback": msg,
-        }
-    except subprocess.TimeoutExpired:
-        msg = "coqc timed out after 120 seconds"
-        print(f"[verifier] ✗ {msg}")
-        return {
-            **state,
-            "proof_source": proof_source,
-            "proof_filepath": proof_path,
-            "proof_passed": False,
-            "proof_error": msg,
-            "retry_feedback": f"{msg}. Simplify the proof obligations.",
-        }
+    if not TradingEnv or not reference_step:
+        return {**state, "proof_passed": False, "proof_error": "Could not find TradingEnv or reference_step"}
+
+    # Fuzz parameters
+    params = {
+        "commission_rate": 0.001,
+        "max_position": 100,
+        "share_size": 1
+    }
+    
+    # Mock data for env
+    mock_data = np.zeros((100, 5))
+    mock_data[:, 3] = 100.0 # Price is 100
+    
+    env = TradingEnv(data=mock_data, initial_cash=10000.0, **params)
+    
+    errors = []
+    for i in range(100):
+        obs, info = env.reset()
+        # Random step
+        action = random.randint(0, 2)
+        
+        # State before
+        cash_pre = env._cash
+        shares_pre = env._shares_held
+        price = env._get_current_price()
+        
+        # Agent execution
+        next_obs, reward, term, trunc, info = env.step(action)
+        cash_post = env._cash
+        shares_post = env._shares_held
+        
+        # Reference execution
+        ref_state = {"cash": float(cash_pre), "shares_held": int(shares_pre)}
+        ref_params = params
+        new_ref_state = reference_step(ref_params, ref_state, float(price), action)
+        
+        # Compare
+        if abs(cash_post - new_ref_state['cash']) > 1e-6 or shares_post != new_ref_state['shares_held']:
+            err = (f"Mismatch at step {i}, Action {action}\n"
+                   f"Inputs: Cash={cash_pre}, Shares={shares_pre}, Price={price}\n"
+                   f"Agent: Cash={cash_post}, Shares={shares_post}\n"
+                   f"Ref:   Cash={new_ref_state['cash']}, Shares={new_ref_state['shares_held']}")
+            errors.append(err)
+            if len(errors) >= 3: break
+
+    if errors:
+        feedback = "Your agent's step logic does NOT match the verified Coq specification!\n\n" + "\n\n".join(errors)
+        print(f"[verifier] ✗ Verification failed: {len(errors)} mismatches found")
+        return {**state, "proof_passed": False, "proof_error": feedback, "retry_feedback": feedback, "current_phase": "code"}
+
+    print("[verifier] ✓ All 100 differential tests passed!")
+    return {**state, "proof_passed": True, "current_phase": "push"}
