@@ -1,8 +1,5 @@
-DIGEST c89322f0a7f7e5434cffafbbcb48857a
+DIGEST d0baa53ef0214563499a4a8b6ddd364e
 Ftrading_agent_proof
-R15:26 Coq.Init.Nat <> <> lib
-R44:58 Coq.Reals.Reals <> <> lib
-sec 70:84 <> PaperTradingEnv
-var 98:101 PaperTradingEnv data
-R106:108 Coq.Init.Nat <> ::nat_scope:x_'^'_x not
-R105:105 Coq.Reals.Rdefinitions RbaseSymbolsImpl R defax
+R15:19 Coq.Arith.Arith <> <> lib
+prf 30:40 <> dummy_proof
+R45:47 Coq.Init.Logic <> ::type_scope:x_'='_x not

@@ -66,7 +66,7 @@ def coder_node(state: AgentState) -> AgentState:
     llm_ollama = ChatOllama(model=model_name, base_url=ollama_url, temperature=0.2)
     if gemini_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
-        llm_gemini = ChatGoogleGenerativeAI(model="gemini-1.5-pro", temperature=0.2, max_retries=0)
+        llm_gemini = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2, max_retries=0)
         llm = llm_gemini.with_fallbacks([llm_ollama])
     else:
         llm = llm_ollama
