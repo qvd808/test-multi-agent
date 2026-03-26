@@ -1,0 +1,10 @@
+services:
+  lean-verifier:
+    build:
+      context: .
+      dockerfile: docker/agent/Dockerfile.lean
+    container_name: lean-verifier
+    volumes:
+      - ./proofs:/app/proofs
+    working_dir: /app/proofs
+    command: lake build
