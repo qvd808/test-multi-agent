@@ -1,0 +1,5 @@
+gymnasium
+yfinance
+numpy
+stable-baselines3[extra]
+shimmy>=2.0

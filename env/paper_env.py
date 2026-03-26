@@ -4,33 +4,54 @@ import numpy as np
 import yfinance as yf
 import subprocess
 import os
+from collections import deque
 
 class MarginGuardEnv(gym.Env):
     """
-    A live paper-trading RL environment where state transitions 
-    are mathematically verified by a Lean 4 compiled binary via Pipe interface.
+    A pro-grade paper-trading RL environment with:
+    1. Lean 4 Formal Verification (The Shield)
+    2. Observation History (Trailing Prices)
+    3. Input Normalization (For Deep Learning stability)
+    4. Historical Data Caching (To avoid yfinance throttling)
     """
-    def __init__(self, ticker="AAPL", initial_balance=100000, binary_path="./proofs/.lake/build/bin/margin_proofs"):
+    def __init__(self, ticker="AAPL", initial_balance=100000, 
+                 history_length=5, use_cache=True,
+                 binary_path="./proofs/.lake/build/bin/margin_proofs"):
         super().__init__()
         
-        # Real-time data source
         self.ticker_name = ticker
-        self.ticker = yf.Ticker(ticker)
         self.initial_balance = initial_balance
+        self.history_length = history_length
         self.binary_path = binary_path
         
         if not os.path.exists(self.binary_path):
-            raise FileNotFoundError(f"Missing {self.binary_path}. Run 'lake build' in the proofs directory.")
+            raise FileNotFoundError(f"Missing {self.binary_path}. Run 'lake build' in proofs/.")
             
-        # 1. Action Space: Sell up to 10 shares (-10), Buy up to 10 shares (+10)
+        # 1. Data Caching (yfinance protection)
+        self.use_cache = use_cache
+        self.data_buffer = []
+        self.current_idx = 0
+        if self.use_cache:
+            print(f"[env] Fetching historical data for {ticker}...")
+            df = yf.download(ticker, period="1y", interval="1h", progress=False)
+            self.data_buffer = df['Close'].values.flatten().tolist()
+            print(f"[env] Cached {len(self.data_buffer)} data points.")
+
+        # 2. Action Space: Discrete(21) -> [-10, +10]
         self.action_space = spaces.Discrete(21, start=-10)
         
-        # 2. Observation Space: [Balance, Position, Current Price]
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.int32)
+        # 3. Observation Space: [norm_bal, norm_pos, price_ratio_1, ..., price_ratio_N]
+        # Size = 2 + history_length
+        obs_size = 2 + self.history_length
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
+        )
+        
+        self.price_history = deque(maxlen=self.history_length + 1)
 
     def _consult_lean_shield(self, b, p, price, q):
-        """Ask the Lean Referee to evaluate the trade."""
-        input_str = f"{int(b)} {int(p)} {int(price)} {int(q)}\n"
+        # Lean expects monetary values in cents, so balance and price are multiplied by 100
+        input_str = f"{int(b * 100)} {int(p)} {int(price)} {int(q)}\n"
         process = subprocess.Popen(
             [self.binary_path],
             stdin=subprocess.PIPE,
@@ -41,72 +62,88 @@ class MarginGuardEnv(gym.Env):
         stdout, stderr = process.communicate(input=input_str)
         if process.returncode != 0:
             raise Exception(f"Lean Shield Error: {stderr}")
-            
         parts = stdout.strip().split(" ")
-        return int(parts[0]), int(parts[1]), int(parts[2])
+        # Lean returns new_balance in cents, so divide by 100 to convert back to dollars
+        return int(parts[0]) / 100, int(parts[1]), int(parts[2])
+
+    def _get_price(self):
+        if self.use_cache and self.current_idx < len(self.data_buffer):
+            price = self.data_buffer[self.current_idx]
+            self.current_idx += 1
+            return price
+        else:
+            # Fallback to live data or restart cache
+            if self.use_cache: self.current_idx = 0
+            ticker = yf.Ticker(self.ticker_name)
+            return ticker.fast_info.get('lastPrice', 150)
+
+    def _get_obs(self):
+        # Normalization:
+        # 1. Balance relative to initial
+        norm_bal = self.balance / self.initial_balance
+        # 2. Position relative to a safe 'unit' (e.g. 100 shares)
+        norm_pos = self.position / 100.0
+        
+        # 3. Price History Ratios (p[t] / p[t-1])
+        # This gives the agent relative movement which is stationary
+        price_ratios = []
+        prices = list(self.price_history)
+        for i in range(1, len(prices)):
+            ratio = prices[i] / prices[i-1] if prices[i-1] != 0 else 1.0
+            price_ratios.append(ratio)
+            
+        # If history isn't full yet, pad with 1.0
+        while len(price_ratios) < self.history_length:
+            price_ratios.insert(0, 1.0)
+            
+        return np.array([norm_bal, norm_pos] + price_ratios, dtype=np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.balance = self.initial_balance
         self.position = 0
+        if self.use_cache: self.current_idx = np.random.randint(0, max(1, len(self.data_buffer) - 100))
         
-        # Fetch initial market price
-        fast_info = self.ticker.fast_info
-        current_price = int(fast_info.get('lastPrice', 150))
+        current_price = self._get_price()
+        self.price_history.clear()
+        self.price_history.append(current_price)
         
-        # Track portfolio value across time
+        # Portfolio value is balance (dollars) + position * price (dollars)
         self.prev_portfolio_value = self.balance + (self.position * current_price)
-        
-        return np.array([self.balance, self.position, current_price], dtype=np.int32), {}
+        return self._get_obs(), {}
 
     def step(self, action_qty):
-        # 1. Get Live Market Data
-        try:
-            current_price = int(self.ticker.fast_info['lastPrice'])
-        except Exception:
-            current_price = 150 # Fallback for demo
+        current_price = self._get_price()
+        self.price_history.append(current_price)
         
-        # 2. Lean Referee Evaluates the Trade via Pipe
+        # Lean Referee evaluates the trade
+        # current_price is multiplied by 100 to convert to cents for Lean
         new_balance, new_position, lean_reward = self._consult_lean_shield(
-            self.balance, self.position, current_price, action_qty
+            self.balance, self.position, int(current_price * 100), action_qty
         )
 
-        # 3. Calculate Final RL Reward
         if lean_reward == -1000:
             final_reward = lean_reward 
         else:
-            # Calculate the REAL portfolio value at the current market price
+            # current_portfolio_value is balance (dollars) + position * price (dollars)
             current_portfolio_value = new_balance + (new_position * current_price)
-            
-            # The reward is how much money we made/lost since the LAST step
             final_reward = current_portfolio_value - self.prev_portfolio_value
-            
-            # Update our tracker for the next step
             self.prev_portfolio_value = current_portfolio_value
 
-        # 4. Commit the verified state
         self.balance = new_balance
         self.position = new_position
         
-        obs = np.array([self.balance, self.position, current_price], dtype=np.int32)
-        done = self.balance <= 0 # End episode if bankrupt
+        obs = self._get_obs()
+        done = self.balance <= 0 or (self.use_cache and self.current_idx >= len(self.data_buffer))
         
-        return obs, final_reward, done, False, {}
+        return obs, float(final_reward), done, False, {}
 
-# Quick Test Execution
 if __name__ == "__main__":
-    env = MarginGuardEnv(ticker="NVDA", initial_balance=50000)
+    env = MarginGuardEnv(ticker="NVDA", history_length=5)
     obs, _ = env.reset()
-    print(f"Initial State -> Balance: ${env.balance}, Position: {env.position}, NVDA Price: ${obs[2]}")
+    print(f"Initial Pro-Observation (Size {len(obs)}): {obs}")
     
-    # Simulate an agent trying to buy 5 shares
-    print("\n--- Agent attempts to BUY 5 shares ---")
-    next_obs, reward, done, _, _ = env.step(5)
-    print(f"New State -> Balance: ${next_obs[0]}, Position: {next_obs[1]}")
-    print(f"Reward Issued: {reward}")
-
-    # Simulate an agent hallucinating and trying to short 100 shares it doesn't own
-    print("\n--- Agent attempts to SELL 100 shares (Illegal) ---")
-    next_obs, reward, done, _, _ = env.step(-100)
-    print(f"New State -> Balance: ${next_obs[0]}, Position: {next_obs[1]} (Notice it didn't change!)")
-    print(f"Reward Issued: {reward} (Lean Shield Penalty applied)")
+    print("\n--- Simulating 5 steps ---")
+    for i in range(5):
+        obs, reward, done, _, _ = env.step(1)
+        print(f"Step {i+1} Reward: {reward:.2f} | Obs[0:2]: {obs[0:2]}")
