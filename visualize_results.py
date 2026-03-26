@@ -1,88 +1,103 @@
-import os
-import sys
-import numpy as np
-import matplotlib.pyplot as plt
+import gymnasium as gym
 from stable_baselines3 import PPO
 from env.paper_env import MarginGuardEnv
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import os
 
-def run_visualization(steps=200):
-    print(f"--- Visualizing MarginGuard PPO Behavior ({steps} steps) ---")
+def run_visualization(model_path="margin_guard_pro_v3_ppo.zip", steps=200):
+    """
+    Diagnostic visualization of a trained agent's performance.
+    """
+    if not os.path.exists(model_path):
+        print(f"Error: Model not found at {model_path}. Train the agent first.")
+        return
+
+    # 1. Setup Env and Model
+    env   = MarginGuardEnv(ticker="ETH-USD", history_length=5, use_cache=True)
+    model = PPO.load(model_path, env=env)
     
-    # 1. Initialize Env and Load Model
-    env = MarginGuardEnv(ticker="ETH-USD", initial_balance=50000, history_length=5, use_cache=True)
-    model = PPO.load("margin_guard_pro_ppo")
-    
-    # Data containers
-    prices = []
-    portfolio_values = []
-    actions = []
-    balances = []
-    positions = []
-    timestamps = range(steps)
-    
-    # 2. Run Simulation
     obs, _ = env.reset()
-    for i in range(steps):
-        action, _states = model.predict(obs, deterministic=True)
-        
-        # Capture raw price before step
-        # Note: obs structure is [norm_bal, norm_pos, ratio1, ...]
-        # We'll get the real price from the env history
-        current_price = env.price_history[-1]
-        portfolio_val = env.balance + (env.position * current_price)
-        
-        prices.append(current_price)
-        portfolio_values.append(portfolio_val)
-        actions.append(action)
-        balances.append(env.balance)
-        positions.append(env.position)
-        
-        obs, reward, terminated, truncated, _ = env.step(action)
-        
-        if terminated or truncated:
-            print(f"Simulation ended early at step {i}")
-            timestamps = range(len(prices))
-            break
+    
+    history = {
+        "price":     [],
+        "balance":   [],
+        "position":  [],
+        "portfolio": [],
+        "reward":    [],
+        "action":    [],
+        "vetoed":    [],
+    }
 
-    # 3. Create Multi-Panel Plot
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1, 1]})
-    
-    # --- Panel 1: Price and Trade Markers ---
-    ax1.plot(timestamps, prices, label='ETH-USD Price', color='blue', alpha=0.6)
-    
-    # Plot Buys (Action > 0)
-    buy_indices = [i for i, a in enumerate(actions) if a > 0]
-    ax1.scatter(buy_indices, [prices[i] for i in buy_indices], marker='^', color='green', label='BUY', s=50, zorder=5)
-    
-    # Plot Sells (Action < 0)
-    sell_indices = [i for i, a in enumerate(actions) if a < 0]
-    ax1.scatter(sell_indices, [prices[i] for i in sell_indices], marker='v', color='red', label='SELL', s=50, zorder=5)
-    
-    ax1.set_ylabel('Price ($)')
-    ax1.set_title('MarginGuard Trade Decisions vs Price')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # --- Panel 2: Portfolio Value ---
-    ax2.plot(timestamps, portfolio_values, label='Portfolio Value (Total Money)', color='purple', linewidth=2)
-    ax2.axhline(y=50000, color='gray', linestyle='--', alpha=0.5, label='Initial Capital')
-    ax2.set_ylabel('Total Value ($)')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # --- Panel 3: Position Size ---
-    ax3.bar(timestamps, positions, color='orange', alpha=0.7, label='Current Position (Shares)')
-    ax3.set_ylabel('Shares')
-    ax3.set_xlabel('Time Step (Hourly)')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
+    # 2. Sequential simulation
+    print(f"[vis] Running simulation for {steps} steps...")
+    for _ in range(steps):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, _, info = env.step(action)
+        
+        history["price"].append(info["price"])
+        history["balance"].append(info["balance"])
+        history["position"].append(info["position"])
+        history["portfolio"].append(info["balance"] + info["position"] * info["price"])
+        history["reward"].append(reward)
+        history["action"].append(info["action"])
+        history["vetoed"].append(info["vetoed"])
+        
+        if done: break
 
-    plt.tight_layout()
-    
-    # Save the output
-    save_path = "performance_plot.png"
-    plt.savefig(save_path)
-    print(f"Plot saved to: {os.path.abspath(save_path)}")
+    # 3. Create 6-panel Dashboard
+    df = pd.DataFrame(history)
+    fig, axes = plt.subplots(3, 2, figsize=(15, 12), gridspec_kw={'hspace': 0.3, 'wspace': 0.2})
+    fig.suptitle(f"MarginGuard v3 — Diagnostic Dashboard (ETH-USD)", fontsize=16, fontweight='bold')
+
+    # Panel 1: Price and Trades
+    axes[0, 0].plot(df["price"], color="gray", alpha=0.5, label="Price")
+    # Mark buys/sells
+    buys = df[df["action"] > 0]
+    sells = df[df["action"] < 0]
+    axes[0, 0].scatter(buys.index, buys["price"], color="green", marker="^", label="Buy", s=50)
+    axes[0, 0].scatter(sells.index, sells["price"], color="red", marker="v", label="Sell", s=50)
+    axes[0, 0].set_title("1. Market Price & Execution")
+    axes[0, 0].legend()
+
+    # Panel 2: Portfolio Value & Drawdown
+    axes[0, 1].plot(df["portfolio"], color="blue", label="Portfolio Value")
+    # Drawdown calculation
+    rolling_max = df["portfolio"].cummax()
+    drawdown = (df["portfolio"] - rolling_max) / rolling_max
+    ax2 = axes[0, 1].twinx()
+    ax2.fill_between(df.index, drawdown, color="red", alpha=0.1, label="Drawdown")
+    axes[0, 1].set_title("2. Portfolio Value & Drawdown (%)")
+    axes[0, 1].set_ylabel("Value ($)")
+    ax2.set_ylabel("Drawdown (%)")
+
+    # Panel 3: Asset Position
+    axes[1, 0].step(df.index, df["position"], color="purple", where="post")
+    axes[1, 0].axhline(0, color="black", linestyle="--", alpha=0.3)
+    axes[1, 0].set_title("3. Asset Position Size")
+    axes[1, 0].set_ylabel("Quantity (Lots)")
+
+    # Panel 4: Step Reward (Verified)
+    axes[1, 1].bar(df.index, df["reward"], color="teal", alpha=0.6)
+    axes[1, 1].set_title("4. Verified Step Reward (Lean Core)")
+    axes[1, 1].set_ylabel("Reward Units")
+
+    # Panel 5: Action Distribution (Histogram)
+    axes[2, 0].hist(df["action"], bins=21, color="orange", alpha=0.7, edgecolor="black")
+    axes[2, 0].set_title("5. Action Distribution (Lots)")
+    axes[2, 0].set_xlabel("Action Qty")
+
+    # Panel 6: Reward Convergence (Cumulative)
+    axes[2, 1].plot(df["reward"].cumsum(), color="gold", linewidth=2)
+    axes[2, 1].set_title("6. Cumulative Verified Reward")
+    axes[2, 1].set_ylabel("Total Reward")
+
+    # Save to artifacts directory
+    output_path = "/root/.gemini/antigravity/brain/595ad11d-e7ec-432f-90d6-28180382fb88/performance_plot.png"
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"[vis] Dashboard saved to {output_path}")
 
 if __name__ == "__main__":
     run_visualization()

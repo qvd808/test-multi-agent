@@ -9,146 +9,199 @@ from datetime import datetime
 
 class MarginGuardEnv(gym.Env):
     """
-    A pro-grade paper-trading RL environment with:
-    1. Lean 4 Formal Verification (The Shield)
-    2. Observation History (Trailing Prices)
-    3. Input Normalization (For Deep Learning stability)
-    4. Historical Data Caching (To avoid yfinance throttling)
+    MarginGuard — Lean Interface Layer
+
+    Design principle: This file is a TRANSPORT LAYER, not a reward designer.
+    All reward logic lives in the Lean binary. Python's only jobs are:
+      1. Fetch price data
+      2. Translate action index → lot qty
+      3. Serialize state → Lean binary (stdin)
+      4. Deserialize Lean output (stdout) → gym step return
+      5. Build the observation vector
+
+    Lean binary I/O contract (all values in integer cents):
+      stdin : "<balance_cents> <position> <price_cents> <qty> <prev_price_cents>"
+      stdout: "<new_balance_cents> <new_position> <reward_cents>"
+
+    The extra `prev_price_cents` field lets Lean compute momentum and holding
+    penalties itself, keeping all reward math formally verified.
     """
-    def __init__(self, ticker="ETH-USD", initial_balance=50000, 
-                 history_length=5, use_cache=True,
-                 binary_path="./proofs/.lake/build/bin/margin_proofs"):
+
+    MAX_STEPS = 500  # Episode cap
+
+    def __init__(
+        self,
+        ticker="ETH-USD",
+        initial_balance=50_000,
+        history_length=5,
+        use_cache=True,
+        binary_path="./proofs/.lake/build/bin/margin_proofs",
+    ):
         super().__init__()
-        
-        self.ticker_name = ticker
+
+        self.ticker_name     = ticker
         self.initial_balance = initial_balance
-        self.history_length = history_length
-        self.binary_path = binary_path
-        
+        self.history_length  = history_length
+        self.binary_path      = binary_path
+
         if not os.path.exists(self.binary_path):
-            raise FileNotFoundError(f"Missing {self.binary_path}. Run 'lake build' in proofs/.")
-            
-        # 1. Data Caching (yfinance protection)
-        self.use_cache = use_cache
+            raise FileNotFoundError(
+                f"Lean binary not found: {self.binary_path}\n"
+                f"Run 'lake build' inside the proofs/ directory."
+            )
+
+        # ── Data cache ────────────────────────────────────────────────────────
+        self.use_cache   = use_cache
         self.data_buffer = []
         self.current_idx = 0
-        if self.use_cache:
-            print(f"[env] Fetching historical data for {ticker}...")
-            df = yf.download(ticker, period="1y", interval="1h", progress=False)
-            self.data_buffer = df['Close'].values.flatten().tolist()
-            print(f"[env] Cached {len(self.data_buffer)} data points.")
 
-        # 2. Action Space: Discrete(21) -> [-10, +10]
-        self.action_space = spaces.Discrete(21, start=-10)
-        
-        # 3. Observation Space: [norm_bal, norm_pos, price_ratio_1, ..., price_ratio_N]
-        # Size = 2 + history_length
+        if self.use_cache:
+            print(f"[env] Fetching {ticker} historical data...")
+            df = yf.download(ticker, period="1y", interval="1h", progress=False)
+            self.data_buffer = df["Close"].values.flatten().tolist()
+            print(f"[env] Cached {len(self.data_buffer)} hourly bars.")
+
+        # ── Action space ──────────────────────────────────────────────────────
+        self.action_space = spaces.Discrete(21)
+        self.ACTION_MAP   = list(range(-10, 11))
+
+        # ── Observation space ─────────────────────────────────────────────────
         obs_size = 2 + self.history_length
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
-        
-        self.price_history = deque(maxlen=self.history_length + 1)
 
-    def _consult_lean_shield(self, b, p, price, q):
-        # Lean expects monetary values in cents, so balance and price are multiplied by 100
-        input_str = f"{int(b * 100)} {int(p)} {int(price)} {int(q)}\n"
-        process = subprocess.Popen(
+        self.price_history = deque(maxlen=self.history_length + 1)
+        self._steps = 0
+
+    # ── Lean IPC ──────────────────────────────────────────────────────────────
+
+    def _consult_lean(self, balance, position, price, qty, prev_price):
+        """
+        Single call to the Lean binary.
+        """
+        payload = (
+            f"{int(balance * 100)} "
+            f"{int(position)} "
+            f"{int(price * 100)} "
+            f"{int(qty)} "
+            f"{int(prev_price * 100)}\n"
+        )
+        proc = subprocess.Popen(
             [self.binary_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            text=True,
         )
-        stdout, stderr = process.communicate(input=input_str)
-        if process.returncode != 0:
-            raise Exception(f"Lean Shield Error: {stderr}")
-        parts = stdout.strip().split(" ")
-        # Lean returns new_balance in cents, so divide by 100 to convert back to dollars
-        return int(parts[0]) / 100, int(parts[1]), int(parts[2])
+        stdout, stderr = proc.communicate(input=payload)
+        if proc.returncode != 0:
+            raise RuntimeError(f"Lean shield error:\n{stderr.strip()}")
+
+        parts = stdout.strip().split()
+        new_balance  = int(parts[0]) / 100   # cents → dollars
+        new_position = int(parts[1])
+        reward       = int(parts[2]) / 100   # cents → reward units
+        return new_balance, new_position, reward
+
+    # ── Data helpers ──────────────────────────────────────────────────────────
 
     def _get_price(self):
         if self.use_cache and self.current_idx < len(self.data_buffer):
-            price = self.data_buffer[self.current_idx]
+            p = float(self.data_buffer[self.current_idx])
             self.current_idx += 1
-            return price
-        else:
-            # Fallback to live data or restart cache
-            if self.use_cache: self.current_idx = 0
-            ticker = yf.Ticker(self.ticker_name)
-            return ticker.fast_info.get('lastPrice', 150)
+            return p
+        if self.use_cache:
+            self.current_idx = 0
+        return float(yf.Ticker(self.ticker_name).fast_info.get("lastPrice", 2000))
 
-    def _get_obs(self):
-        # Normalization:
-        # 1. Balance relative to initial
+    def _build_obs(self):
         norm_bal = self.balance / self.initial_balance
-        # 2. Position relative to a safe 'unit' (e.g. 100 shares)
-        norm_pos = self.position / 100.0
-        
-        # 3. Price History Ratios (p[t] / p[t-1])
-        # This gives the agent relative movement which is stationary
-        price_ratios = []
+        norm_pos = np.clip(self.position / 10.0, -1.0, 1.0)
+
         prices = list(self.price_history)
-        for i in range(1, len(prices)):
-            ratio = prices[i] / prices[i-1] if prices[i-1] != 0 else 1.0
-            price_ratios.append(ratio)
-            
-        # If history isn't full yet, pad with 1.0
-        while len(price_ratios) < self.history_length:
-            price_ratios.insert(0, 1.0)
-            
-        return np.array([norm_bal, norm_pos] + price_ratios, dtype=np.float32)
+        ratios = [
+            prices[i] / prices[i - 1] if prices[i - 1] != 0 else 1.0
+            for i in range(1, len(prices))
+        ]
+        while len(ratios) < self.history_length:
+            ratios.insert(0, 1.0)
+
+        return np.array([norm_bal, norm_pos] + ratios, dtype=np.float32)
+
+    # ── Gym interface ─────────────────────────────────────────────────────────
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.balance = self.initial_balance
+        self.balance  = self.initial_balance
         self.position = 0
-        if self.use_cache: self.current_idx = np.random.randint(0, max(1, len(self.data_buffer) - 100))
-        
-        current_price = self._get_price()
-        self.price_history.clear()
-        self.price_history.append(current_price)
-        
-        # Portfolio value is balance (dollars) + position * price (dollars)
-        self.prev_portfolio_value = self.balance + (self.position * current_price)
-        return self._get_obs(), {}
+        self._steps   = 0
 
-    def step(self, action_qty):
+        if self.use_cache:
+            self.current_idx = np.random.randint(
+                0, max(1, len(self.data_buffer) - self.MAX_STEPS - 10)
+            )
+
+        price = self._get_price()
+        self.price_history.clear()
+        self.price_history.append(price)
+
+        return self._build_obs(), {}
+
+    def step(self, action_idx):
+        self._steps += 1
+        action_qty = self.ACTION_MAP[int(action_idx)]
+
+        prev_price    = float(self.price_history[-1])
         current_price = self._get_price()
         self.price_history.append(current_price)
-        
-        # Lean Referee evaluates the trade
-        # current_price is multiplied by 100 to convert to cents for Lean
-        new_balance, new_position, lean_reward = self._consult_lean_shield(
-            self.balance, self.position, int(current_price * 100), action_qty
+
+        # ── Entire reward computation happens inside Lean ─────────────────────
+        new_balance, new_position, reward = self._consult_lean(
+            self.balance, self.position,
+            current_price, action_qty,
+            prev_price,
         )
 
-        if lean_reward == -1000:
-            final_reward = lean_reward 
-        else:
-            # current_portfolio_value is balance (dollars) + position * price (dollars)
-            current_portfolio_value = new_balance + (new_position * current_price)
-            final_reward = current_portfolio_value - self.prev_portfolio_value
-            self.prev_portfolio_value = current_portfolio_value
-
+        # ── Log trades ────────────────────────────────────────────────────────
         if action_qty != 0:
-            side = "BUY" if action_qty > 0 else "SELL"
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {side} {abs(action_qty)} @ ${current_price:.2f} | Result: {'SUCCESS' if lean_reward != -1000 else 'VETOED'}")
+            side   = "BUY " if action_qty > 0 else "SELL"
+            vetoed = (new_balance == self.balance and new_position == self.position)
+            status = "VETOED " if vetoed else "SUCCESS"
+            print(
+                f"[{datetime.now().strftime('%H:%M:%S')}] {side} {abs(action_qty):2d}"
+                f" @ ${current_price:,.2f} | {status} | reward={reward:+.4f}"
+            )
 
-        self.balance = new_balance
+        self.balance  = new_balance
         self.position = new_position
-        
-        obs = self._get_obs()
-        done = self.balance <= 0 or (self.use_cache and self.current_idx >= len(self.data_buffer))
-        
-        return obs, float(final_reward), done, False, {}
+
+        obs  = self._build_obs()
+        done = (
+            self.balance <= 0
+            or (self.use_cache and self.current_idx >= len(self.data_buffer))
+            or self._steps >= self.MAX_STEPS
+        )
+
+        info = {
+            "price":    current_price,
+            "balance":  new_balance,
+            "position": new_position,
+            "action":   action_qty,
+            "reward":   reward,
+            "vetoed":   (new_balance == self.balance and new_position == self.position and action_qty != 0)
+        }
+
+        return obs, float(reward), done, False, info
 
 if __name__ == "__main__":
     env = MarginGuardEnv(ticker="ETH-USD", history_length=5)
     obs, _ = env.reset()
-    print(f"Initial Pro-Observation (Size {len(obs)}): {obs}")
-    
-    print("\n--- Simulating 5 steps ---")
+    print(f"Initial observation (size {len(obs)}): {obs}\n")
+
+    print("--- Simulating 5 steps ---")
     for i in range(5):
-        obs, reward, done, _, _ = env.step(1)
-        print(f"Step {i+1} Reward: {reward:.2f} | Obs[0:2]: {obs[0:2]}")
+        action = env.action_space.sample()
+        obs, reward, done, _, info = env.step(action)
+        print(f"Step {i+1} | action={env.ACTION_MAP[action]:+3d} | reward={reward:+.2f}")
+        if done: break

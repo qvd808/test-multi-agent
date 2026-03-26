@@ -1,77 +1,74 @@
-import os
-import sys
 import gymnasium as gym
-import numpy as np
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
+from env.paper_env import MarginGuardEnv
+import os
 
-# Ensure the local environment can be found
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
-
-try:
-    from stable_baselines3 import PPO
-    from env.paper_env import MarginGuardEnv
-except ImportError:
-    print("Dependencies missing. Run: pip install gymnasium yfinance numpy stable-baselines3[extra] shimmy>=2.0")
-    sys.exit(1)
-
-def train_agent():
+class RewardShapingCallback(BaseCallback):
     """
-    Trains a PPO agent in the Pro-Enhanced MarginGuard sandbox.
+    Diagnostic callback to monitor vetoes and verified rewards in TensorBoard.
     """
-    print("--- MarginGuard 'Pro' Training Start ---")
-    
-    # 1. Instantiate the Pro Environment
-    # We use ETH-USD for 24/7 market simulation
-    try:
-        env = MarginGuardEnv(ticker="ETH-USD", initial_balance=50000, history_length=5, use_cache=True)
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}")
-        return
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.vetoes = 0
 
-    # 2. Initialize the PPO Model
-    # We now have 7-dimensional normalized observations
-    print(f"[agent] Observation Space: {env.observation_space}")
-    print("[agent] Building PPO model...")
-    model = PPO(
-        "MlpPolicy", 
-        env, 
-        verbose=1, 
-        learning_rate=1e-4, # Lower LR for stability with normalized inputs
-        gamma=0.99,
-        ent_coef=0.01,
-        tensorboard_log="./margin_guard_logs/"
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            if info.get("vetoed", False):
+                self.vetoes += 1
+            
+            # Log metrics to TensorBoard
+            self.logger.record("env/reward", info.get("reward", 0))
+            self.logger.record("env/balance", info.get("balance", 0))
+            self.logger.record("env/position", info.get("position", 0))
+            self.logger.record("env/cumulative_vetoes", self.vetoes)
+        return True
+
+def train():
+    # ── 1. Create Environment ──────────────────────────────────────────────────
+    # history_length=5 gives the agent "memory" of recent price trends.
+    env = MarginGuardEnv(
+        ticker="ETH-USD",
+        initial_balance=50_000,
+        history_length=5,
+        use_cache=True
     )
 
-    # 3. Train for 100,000 timesteps
-    # Watch ep_rew_mean climb as it learns the Lean Shield rules
-    print("[agent] Starting training... (Cached data helps avoid rate limits)")
-    model.learn(total_timesteps=100000, progress_bar=True)
+    # ── 2. Configure PPO Agent ─────────────────────────────────────────────────
+    # We use a Multi-Layer Perceptron (MlpPolicy) with normalized inputs.
+    model = PPO(
+        "MlpPolicy",
+        env,
+        verbose=1,
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.01,         # Encourage exploration
+        tensorboard_log="./logs/margin_guard_v3/"
+    )
 
-    # 4. Save the Model
-    model.save("margin_guard_pro_ppo")
-    print("[agent] Pro Model saved to margin_guard_pro_ppo.zip")
+    # ── 3. Train ───────────────────────────────────────────────────────────────
+    print("\n[agent] Starting training of Verfied PPO (v3)...")
+    callback = RewardShapingCallback()
+    
+    # Train for 200k steps for a "stable" trader
+    model.learn(
+        total_timesteps=200_000,
+        callback=callback,
+        progress_bar=True
+    )
 
-def evaluate_agent():
-    print("\n--- Starting Pro Evaluation Loop (10 Steps) ---")
-    env = MarginGuardEnv(ticker="ETH-USD", initial_balance=50000, history_length=5, use_cache=True)
-    model = PPO.load("margin_guard_pro_ppo")
-
-    obs, _ = env.reset()
-    for i in range(1, 11):
-        action, _states = model.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        # Observation is [norm_bal, norm_pos, ratio1, ...]
-        balance = obs[0] * 50000
-        position = obs[1] * 100
-        
-        print(f"Step {i}:")
-        print(f"  Action (Qty): {action}")
-        print(f"  Obs -> Bal: ${balance:.2f}, Pos: {position:.2f}")
-        print(f"  Step Reward: {reward:.2f}")
-        
-        if terminated or truncated:
-            break
+    # ── 4. Save ────────────────────────────────────────────────────────────────
+    model_path = "margin_guard_pro_v3_ppo"
+    model.save(model_path)
+    print(f"[agent] Training complete. Model saved to {model_path}.zip")
 
 if __name__ == "__main__":
-    train_agent()
-    evaluate_agent()
+    # Ensure log directories exist
+    os.makedirs("./logs/margin_guard_v3/", exist_ok=True)
+    train()
