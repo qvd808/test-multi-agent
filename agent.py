@@ -20,9 +20,9 @@ def train_agent():
     print("--- MarginGuard 'Pro' Training Start ---")
     
     # 1. Instantiate the Pro Environment
-    # history_length=5, use_cache=True (Yahoo Finance Protection)
+    # We use ETH-USD for 24/7 market simulation
     try:
-        env = MarginGuardEnv(ticker="NVDA", initial_balance=50000, history_length=5, use_cache=True)
+        env = MarginGuardEnv(ticker="ETH-USD", initial_balance=50000, history_length=5, use_cache=True)
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
         return
@@ -52,7 +52,7 @@ def train_agent():
 
 def evaluate_agent():
     print("\n--- Starting Pro Evaluation Loop (10 Steps) ---")
-    env = MarginGuardEnv(ticker="NVDA", initial_balance=50000, history_length=5, use_cache=True)
+    env = MarginGuardEnv(ticker="ETH-USD", initial_balance=50000, history_length=5, use_cache=True)
     model = PPO.load("margin_guard_pro_ppo")
 
     obs, _ = env.reset()
@@ -60,7 +60,7 @@ def evaluate_agent():
         action, _states = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
         
-        # Un-normalize for display
+        # Observation is [norm_bal, norm_pos, ratio1, ...]
         balance = obs[0] * 50000
         position = obs[1] * 100
         

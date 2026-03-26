@@ -5,6 +5,7 @@ import yfinance as yf
 import subprocess
 import os
 from collections import deque
+from datetime import datetime
 
 class MarginGuardEnv(gym.Env):
     """
@@ -14,7 +15,7 @@ class MarginGuardEnv(gym.Env):
     3. Input Normalization (For Deep Learning stability)
     4. Historical Data Caching (To avoid yfinance throttling)
     """
-    def __init__(self, ticker="AAPL", initial_balance=100000, 
+    def __init__(self, ticker="ETH-USD", initial_balance=50000, 
                  history_length=5, use_cache=True,
                  binary_path="./proofs/.lake/build/bin/margin_proofs"):
         super().__init__()
@@ -130,6 +131,10 @@ class MarginGuardEnv(gym.Env):
             final_reward = current_portfolio_value - self.prev_portfolio_value
             self.prev_portfolio_value = current_portfolio_value
 
+        if action_qty != 0:
+            side = "BUY" if action_qty > 0 else "SELL"
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {side} {abs(action_qty)} @ ${current_price:.2f} | Result: {'SUCCESS' if lean_reward != -1000 else 'VETOED'}")
+
         self.balance = new_balance
         self.position = new_position
         
@@ -139,7 +144,7 @@ class MarginGuardEnv(gym.Env):
         return obs, float(final_reward), done, False, {}
 
 if __name__ == "__main__":
-    env = MarginGuardEnv(ticker="NVDA", history_length=5)
+    env = MarginGuardEnv(ticker="ETH-USD", history_length=5)
     obs, _ = env.reset()
     print(f"Initial Pro-Observation (Size {len(obs)}): {obs}")
     
