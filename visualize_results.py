@@ -186,4 +186,4 @@ def run_visualization(model_path="margin_guard_pro_v3_ppo", steps=200, save_path
     print(f"✓ Saved visualizer to {save_path}")
 
 if __name__ == "__main__":
-    run_visualization()
+    run_visualization(steps=20000)

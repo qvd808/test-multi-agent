@@ -1,9 +1,9 @@
 -- MarginProofs/Core.lean (definitions only, no imports needed)
-def VETO_PENALTY      : Int := -2000
+def VETO_PENALTY      : Int := -5000
 def HOLDING_SCALE     : Int := 10
 def DIRECTION_BONUS   : Int := 50
-def INACTION_PENALTY  : Int := -200
-def PROFIT_TAKE_BONUS : Int := 1000
+def INACTION_PENALTY  : Int := -180
+def PROFIT_TAKE_BONUS : Int := 1100
 
 def is_valid_trade (balance : Int) (position : Int) (price : Int) (qty : Int) : Bool :=
   if qty > 0 then decide (qty * price ≤ balance)

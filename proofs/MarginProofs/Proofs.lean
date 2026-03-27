@@ -43,7 +43,7 @@ theorem veto_is_noop (balance position price qty : Int) :
 
 -- Proof 3: Inaction penalty is exactly -200 when qty=0, 0 otherwise
 theorem inaction_penalty_spec (qty : Int) :
-  inaction_penalty qty = if qty = 0 then -200 else 0 := by
+  inaction_penalty qty = if qty = 0 then -180 else 0 := by
   unfold inaction_penalty
   split_ifs <;> rfl
 
