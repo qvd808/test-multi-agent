@@ -11,7 +11,7 @@ extern "C" {
 
 FFI_EXPORT void margin_proofs_init(void);
 
-FFI_EXPORT int64_t c_trade_reward(int64_t b, int64_t p, int64_t pr, int64_t q, int64_t pp);
+FFI_EXPORT int64_t c_trade_reward(int64_t b, int64_t p, int64_t pr, int64_t q, int64_t pp, int64_t ae, int64_t sw);
 
 FFI_EXPORT int64_t c_trade_balance(int64_t b, int64_t p, int64_t pr, int64_t q);
 

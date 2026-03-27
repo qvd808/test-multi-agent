@@ -7,7 +7,7 @@ void lean_initialize(void);
 void lean_io_mark_end_initialization(void);
 
 /* Lean-exported functions from our Core.lean */
-extern lean_object* lean_trade_reward(lean_object*, lean_object*, lean_object*, lean_object*, lean_object*);
+extern lean_object* lean_trade_reward(lean_object*, lean_object*, lean_object*, lean_object*, lean_object*, lean_object*, lean_object*);
 extern lean_object* lean_trade_balance(lean_object*, lean_object*, lean_object*, lean_object*, lean_object*);
 extern lean_object* lean_trade_position(lean_object*, lean_object*, lean_object*, lean_object*, lean_object*);
 
@@ -33,8 +33,8 @@ static inline int64_t from_lean(lean_object* obj) {
     return (int64_t)lean_int64_of_int(obj);
 }
 
-int64_t c_trade_reward(int64_t b, int64_t p, int64_t pr, int64_t q, int64_t pp) {
-    lean_object* r = lean_trade_reward(to_lean(b), to_lean(p), to_lean(pr), to_lean(q), to_lean(pp));
+int64_t c_trade_reward(int64_t b, int64_t p, int64_t pr, int64_t q, int64_t pp, int64_t ae, int64_t sw) {
+    lean_object* r = lean_trade_reward(to_lean(b), to_lean(p), to_lean(pr), to_lean(q), to_lean(pp), to_lean(ae), to_lean(sw));
     int64_t res = from_lean(r);
     lean_dec(r);
     return res;

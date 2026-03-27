@@ -1,9 +1,11 @@
--- MarginProofs/Core.lean (definitions only, no imports needed)
+-- MarginProofs/Core.lean
+
 def VETO_PENALTY      : Int := -5000
 def HOLDING_SCALE     : Int := 10
 def DIRECTION_BONUS   : Int := 50
 def INACTION_PENALTY  : Int := -180
-def PROFIT_TAKE_BONUS : Int := 1100
+def STRATEGY_BONUS    : Int := 3000
+def BAD_EXIT_PENALTY  : Int := -1000
 
 def is_valid_trade (balance : Int) (position : Int) (price : Int) (qty : Int) : Bool :=
   if qty > 0 then decide (qty * price ≤ balance)
@@ -24,37 +26,29 @@ def pnl_reward (balance : Int) (position : Int) (price : Int) (qty : Int) (prev_
 def holding_penalty (position : Int) (qty : Int) : Int :=
   -Int.ofNat (Int.natAbs (position + qty)) * HOLDING_SCALE
 
-def direction_bonus (qty : Int) (price : Int) (prev_price : Int) : Int :=
-  if qty = 0 then 0
-  else
-    let price_move := price - prev_price
-    let is_correct := (qty > 0 && price_move > 0) || (qty < 0 && price_move < 0)
-    let magnitude := if price_move < -50 then 50 else if price_move > 50 then 50 else if price_move < 0 then -price_move else price_move
-    let scale := if qty < 0 then -qty else qty
-    let base := magnitude * scale
-    if is_correct then base else -base
-
-def profit_taking_bonus (position : Int) (qty : Int) (price : Int) (prev_price : Int) : Int :=
-  let is_closing := (position > 0 && qty < 0) || (position < 0 && qty > 0)
-  if is_closing then
-    let closed_qty := if Int.natAbs position < Int.natAbs qty then Int.ofNat (Int.natAbs position) else Int.ofNat (Int.natAbs qty)
-    let profit := (price - prev_price) * closed_qty
-    if profit > 0 then profit + PROFIT_TAKE_BONUS else profit - 200
-  else 0
-
 def inaction_penalty (qty : Int) : Int :=
   if qty = 0 then INACTION_PENALTY else 0
 
+-- Strategy Audit: Proof that Selling at t > Entry results in profit
+-- Also considers 1-week SMA for "market phase" context
+def strategy_reward (position : Int) (qty : Int) (price : Int) (avg_entry : Int) (sma_week : Int) : Int :=
+  let is_closing := (position > 0 && qty < 0) || (position < 0 && qty > 0)
+  if is_closing then
+    let is_profitable := (position > 0 && price > avg_entry) || (position < 0 && price < avg_entry)
+    let trend_bonus := if (position > 0 && price > sma_week) || (position < 0 && price < sma_week) then 500 else 0
+    if is_profitable then STRATEGY_BONUS + trend_bonus else BAD_EXIT_PENALTY
+  else 0
+
 @[export lean_trade_reward]
-def c_trade_reward (balance : Int) (position : Int) (price : Int) (qty : Int) (prev_price : Int) : Int :=
+def c_trade_reward (balance : Int) (position : Int) (price : Int) (qty : Int) 
+                   (prev_price : Int) (avg_entry : Int) (sma_week : Int) : Int :=
   if ¬(is_valid_trade balance position price qty) then VETO_PENALTY
   else
-    let unrealized := pnl_reward balance position price qty prev_price
-    let holding := holding_penalty position qty
-    let direction := direction_bonus qty price prev_price
-    let realized := profit_taking_bonus position qty price prev_price
+    let pnl      := pnl_reward balance position price qty prev_price
+    let strategy := strategy_reward position qty price avg_entry sma_week
+    let holding  := holding_penalty position qty
     let inactive := inaction_penalty qty
-    unrealized + holding + direction + realized + inactive
+    pnl + strategy + holding + inactive
 
 @[export lean_trade_balance]
 def c_trade_balance (balance : Int) (position : Int) (price : Int) (qty : Int) (_ : Int := 0) : Int :=

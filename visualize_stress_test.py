@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # ── CONFIGURATION ────────────────────────────────────────────────────────────
-CSV_FILE = "margin_guard_audit_20260326_2018.csv"
+CSV_FILE = "margin_guard_audit_20260326_2320.csv"
 DOWNSAMPLE_FACTOR = 1000  # Plot every 1000th step to save memory
 # ──────────────────────────────────────────────────────────────────────────────
 

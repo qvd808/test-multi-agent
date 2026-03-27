@@ -53,17 +53,20 @@ class MarginGuardEnv(gym.Env):
         self.action_space = spaces.Discrete(21)
         self.ACTION_MAP = list(range(-10, 11))
 
-        obs_size = 2 + self.history_length
+        self.price_history = deque(maxlen=self.history_length + 1)
+        self.avg_entry_price = 0.0
+        self._steps = 0
+
+        # ── Expanded Observation Space ────────────────────────────────────────
+        # [Bal, Pos, Week Signal, Entry Ratio, Ratio1, Ratio2, Ratio3, Ratio4, Ratio5]
+        obs_size = 4 + self.history_length
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
 
-        self.price_history = deque(maxlen=self.history_length + 1)
-        self._steps = 0
-
-    def _consult_lean(self, balance, position, price, qty, prev_price):
+    def _consult_lean(self, balance, position, price, qty, prev_price, avg_entry, sma_week):
         """Fast FFI call to verified Lean functions"""
-        return self.core.trade(balance, position, price, qty, prev_price)
+        return self.core.trade(balance, position, price, qty, prev_price, avg_entry, sma_week)
 
     def _get_price(self):
         if self.use_cache and self.current_idx < len(self.data_buffer):
@@ -78,6 +81,17 @@ class MarginGuardEnv(gym.Env):
         norm_bal = self.balance / self.initial_balance
         norm_pos = np.clip(self.position / 10.0, -1.0, 1.0)
 
+        # 1-Week Signal (168 hours)
+        current_price = self.price_history[-1]
+        if self.use_cache and self.current_idx >= 168:
+            week_data = self.data_buffer[self.current_idx-168:self.current_idx]
+            week_sma = sum(week_data) / len(week_data)
+        else:
+            week_sma = current_price
+            
+        week_signal = current_price / week_sma if week_sma > 0 else 1.0
+        entry_ratio = self.avg_entry_price / current_price if self.avg_entry_price > 0 else 0.0
+
         prices = list(self.price_history)
         ratios = [
             prices[i] / prices[i - 1] if prices[i - 1] != 0 else 1.0
@@ -86,12 +100,13 @@ class MarginGuardEnv(gym.Env):
         while len(ratios) < self.history_length:
             ratios.insert(0, 1.0)
 
-        return np.array([norm_bal, norm_pos] + ratios, dtype=np.float32)
+        return np.array([norm_bal, norm_pos, week_signal, entry_ratio] + ratios, dtype=np.float32), week_sma
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.balance = self.initial_balance
         self.position = 0
+        self.avg_entry_price = 0.0
         self._steps = 0
 
         if self.use_cache:
@@ -103,7 +118,8 @@ class MarginGuardEnv(gym.Env):
         self.price_history.clear()
         self.price_history.append(price)
 
-        return self._build_obs(), {}
+        obs, _ = self._build_obs()
+        return obs, {}
 
     def step(self, action_idx):
         self._steps += 1
@@ -113,12 +129,23 @@ class MarginGuardEnv(gym.Env):
         current_price = self._get_price()
         self.price_history.append(current_price)
 
-        # Fast FFI call (~0.02ms vs ~60ms for subprocess)
+        obs, sma_week = self._build_obs()
+
+        # Fast FFI call with strategy markers
         new_balance, new_position, reward = self._consult_lean(
             self.balance, self.position,
             current_price, action_qty,
-            prev_price,
+            prev_price, self.avg_entry_price, sma_week
         )
+
+        # Update Cost Basis
+        if not (abs(new_balance - self.balance) < 0.01 and abs(new_position - self.position) < 0.01):
+            if action_qty > 0: # Buy
+                total_cost = (self.position * self.avg_entry_price) + (action_qty * current_price)
+                self.avg_entry_price = total_cost / (self.position + action_qty)
+            
+        if new_position == 0:
+            self.avg_entry_price = 0.0
 
         if action_qty != 0:
             side = "BUY " if action_qty > 0 else "SELL"
@@ -126,13 +153,12 @@ class MarginGuardEnv(gym.Env):
             status = "VETOED " if vetoed else "SUCCESS"
             print(
                 f"[{datetime.now().strftime('%H:%M:%S')}] {side} {abs(action_qty):2d}"
-                f" @ ${current_price:,.2f} | {status} | reward={reward:+.4f}"
+                f" @ ${current_price:,.2f} | {status} | reward={reward:+.4f} | Entry=${self.avg_entry_price:,.2f}"
             )
 
         self.balance = new_balance
         self.position = new_position
 
-        obs = self._build_obs()
         done = (
             self.balance <= 0
             or (self.use_cache and self.current_idx >= len(self.data_buffer))
