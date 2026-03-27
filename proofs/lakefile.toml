@@ -4,6 +4,7 @@ defaultTargets = ["margin_proofs"]
 
 [[lean_lib]]
 name = "MarginProofs"
+defaultFacets = ["shared"]
 
 [[lean_exe]]
 name = "margin_proofs"

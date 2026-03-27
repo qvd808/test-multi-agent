@@ -40,6 +40,7 @@ def train():
     model = PPO(
         "MlpPolicy",
         env,
+        device="cuda",  # Forces training on the GPU
         verbose=1,
         learning_rate=3e-4,
         n_steps=2048,
